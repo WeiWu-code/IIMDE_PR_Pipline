@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: evoagent
       POSTGRES_USER: evoagent
@@ -8,13 +9,16 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U evoagent"]
+      test: ["CMD-SHELL", "pg_isready -U evoagent -d evoagent"]
       interval: 5s
       timeout: 3s
       retries: 15
+    networks:
+      - backend
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -23,11 +27,15 @@ services:
       interval: 5s
       timeout: 3s
       retries: 15
+    networks:
+      - backend
 
   evoagent:
     build: .
+    restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Keep the origin private. Cloudflare Tunnel is the public entrypoint.
+      - "127.0.0.1:${EVOAGENT_PORT:-8080}:8080"
     environment:
       EVOAGENT_HOST: 0.0.0.0
       EVOAGENT_DATABASE_URL: postgresql://evoagent:evoagent-local@postgres:5432/evoagent
@@ -46,7 +54,33 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - backend
+      - tunnel
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    # Quick Tunnel: the public trycloudflare.com URL is printed in the logs.
+    # Do not recreate or restart this container while the URL is in use.
+    restart: "no"
+    command: ["tunnel", "--no-autoupdate", "--loglevel", "info", "--url", "http://evoagent:8080"]
+    depends_on:
+      evoagent:
+        condition: service_healthy
+    networks:
+      - tunnel
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  backend:
+    internal: true
+  tunnel:

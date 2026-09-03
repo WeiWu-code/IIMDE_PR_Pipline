@@ -44,6 +44,46 @@ Bootstrap 管理员只在用户名尚不存在时创建；已有同名用户的�
 
 服务默认监听 `127.0.0.1:8080`。启动后打开 `http://127.0.0.1:8080/`，前端会在业务 API 返回未授权状态后显示登录层。登录状态保存在当前浏览器的 `localStorage` 中；需要重新登录时可以点击退出，或清除站点数据。
 
+## Docker Compose 与 Cloudflare Quick Tunnel 部署
+
+`docker-compose.yml` 会启动 EvoAgent、PostgreSQL、Redis 和 `cloudflared`。Quick Tunnel 不需要 Cloudflare 账号、域名或 Tunnel Token。公网流量通过随机的 `trycloudflare.com` 地址进入，宿主机的 8080 端口只绑定到 `127.0.0.1`，不会直接暴露在公网网卡上。
+
+从 `.env.example` 复制出项目根目录的 `.env`，至少设置以下值：
+
+```env
+EVOAGENT_AUTH_SECRET=至少32字节的随机密钥
+EVOAGENT_BOOTSTRAP_ADMIN_USERNAME=admin
+EVOAGENT_BOOTSTRAP_ADMIN_PASSWORD=至少10个字符的强密码
+
+EVOAGENT_LLM_PROVIDER=deepseek
+EVOAGENT_DEEPSEEK_API_KEY=你的APIKey
+
+EVOAGENT_GITHUB_WEBHOOK_SECRET=另一个独立的随机密钥
+EVOAGENT_GITHUB_TOKEN=你的GitHubFineGrainedPAT
+EVOAGENT_AUTO_POST_REVIEW=true
+```
+
+登录密钥与 GitHub Webhook Secret 必须不同。启动后，从 `cloudflared` 日志中找到形如 `https://example.trycloudflare.com` 的公网地址：
+
+```powershell
+docker compose up -d --build
+docker compose ps
+docker compose logs cloudflared
+Invoke-RestMethod http://127.0.0.1:8080/health
+Invoke-RestMethod https://example.trycloudflare.com/health
+```
+
+最后在 GitHub 仓库的 **Settings → Webhooks → Add webhook** 中设置：
+
+- Payload URL：`https://example.trycloudflare.com/webhooks/github`
+- Content type：`application/json`
+- Secret：与 `EVOAGENT_GITHUB_WEBHOOK_SECRET` 完全一致
+- Events：只选择 **Pull requests**
+
+将示例域名替换成日志里的真实地址。EvoAgent 会使用 `EVOAGENT_GITHUB_WEBHOOK_SECRET` 校验 GitHub 的 HMAC 签名。
+
+Quick Tunnel 适合临时使用。地址使用期间不要重启、重建或删除 `cloudflared` 容器；地址一旦变化，必须同步修改 GitHub Webhook 的 Payload URL。只更新应用时使用 `docker compose up -d --build --no-deps evoagent`，避免触碰正在运行的 Tunnel。不要在使用期间执行 `docker compose down`。
+
 API 调用需要先登录并携带 Bearer Token：
 
 ```powershell
@@ -260,4 +300,3 @@ HTTP / GitHub Webhook
               ├── Critic Worker：由 Lead 委派的盲审、反例与证据挑战
               └── Gates
 ```
-
