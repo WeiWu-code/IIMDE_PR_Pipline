@@ -1,4 +1,4 @@
-# EvoAgent PR Reviewer
+# IIMED PR Pipeline
 
 - 审查统一 diff，输出结构化问题、修复建议和测试建议
 - GitHub `pull_request` webhook（`opened`、`reopened`、`synchronize`）
