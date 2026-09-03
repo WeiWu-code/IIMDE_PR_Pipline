@@ -13,6 +13,10 @@ class PermanentTaskError(RuntimeError):
     """An error that must not be retried."""
 
 
+class TaskExecutionActive(RuntimeError):
+    """Another live worker still owns this task; keep the delivery pending."""
+
+
 class TaskQueue:
     STREAM = "evoagent:review:stream"
     DLQ = "evoagent:review:dlq"
@@ -33,6 +37,9 @@ class TaskQueue:
         self._memory: queue.Queue = queue.Queue()
         self._memory_dlq = []
         self._lock = threading.Lock()
+        self._reclaim_lock = threading.Lock()
+        self._reclaim_cursor = "0-0"
+        self._next_reclaim = 0.0
         self._stop = threading.Event()
         self.consumer = "%s-%s" % (socket.gethostname(), uuid.uuid4().hex[:8])
         if redis_url:
@@ -72,6 +79,14 @@ class TaskQueue:
         try:
             self.handler(envelope["payload"])
             return True
+        except TaskExecutionActive:
+            envelope["attempt"] = max(0, envelope["attempt"] - 1)
+            if self._redis:
+                raise
+            timer = threading.Timer(1, self._submit_memory, args=(envelope,))
+            timer.daemon = True
+            timer.start()
+            return False
         except PermanentTaskError as exc:
             self._dead_letter(envelope, str(exc))
             return False
@@ -79,6 +94,7 @@ class TaskQueue:
             if envelope["attempt"] >= self.max_attempts:
                 self._dead_letter(envelope, str(exc))
             elif self._redis:
+                time.sleep(min(2 ** (envelope["attempt"] - 1), 10))
                 self._redis.xadd(self.STREAM, {
                     "envelope": json.dumps(envelope, ensure_ascii=False)
                 })
@@ -94,10 +110,11 @@ class TaskQueue:
             self._executor.submit(self._deliver, envelope)
 
     def _redis_worker(self) -> None:
+        consumer = "%s-%s" % (self.consumer, threading.get_ident())
         while not self._stop.is_set():
-            self._reclaim_stale()
+            self._reclaim_stale(consumer)
             messages = self._redis.xreadgroup(
-                self.GROUP, self.consumer, {self.STREAM: ">"}, count=1, block=1000
+                self.GROUP, consumer, {self.STREAM: ">"}, count=1, block=1000
             )
             for _stream, entries in messages:
                 for redis_id, fields in entries:
@@ -115,24 +132,41 @@ class TaskQueue:
                         self._deliver(envelope)
                         # ACK only after work completed or was safely requeued/DLQed.
                         self._redis.xack(self.STREAM, self.GROUP, redis_id)
+                    except TaskExecutionActive:
+                        # The current owner will ACK. If it dies, the entry remains
+                        # pending and becomes eligible for a later lease recovery.
+                        continue
                     except Exception:
                         # Infrastructure failure: leave pending for lease recovery.
                         continue
 
-    def _reclaim_stale(self) -> None:
+    def _reclaim_stale(self, consumer: str) -> None:
+        if not self._reclaim_lock.acquire(blocking=False):
+            return
         try:
+            now = time.monotonic()
+            if now < self._next_reclaim:
+                return
+            self._next_reclaim = now + max(1.0, min(self.lease_seconds / 3.0, 30.0))
             result = self._redis.xautoclaim(
-                self.STREAM, self.GROUP, self.consumer,
-                min_idle_time=self.lease_seconds * 1000, start_id="0-0", count=10,
+                self.STREAM, self.GROUP, consumer,
+                min_idle_time=self.lease_seconds * 1000,
+                start_id=self._reclaim_cursor, count=10,
             )
+            self._reclaim_cursor = str(result[0] or "0-0")
             entries = result[1] if len(result) > 1 else []
             for redis_id, fields in entries:
                 envelope = json.loads(fields["envelope"])
-                self._deliver(envelope)
-                self._redis.xack(self.STREAM, self.GROUP, redis_id)
+                try:
+                    self._deliver(envelope)
+                    self._redis.xack(self.STREAM, self.GROUP, redis_id)
+                except TaskExecutionActive:
+                    continue
         except Exception:
             # Redis versions without XAUTOCLAIM still process new entries.
             return
+        finally:
+            self._reclaim_lock.release()
 
     def _dead_letter(self, envelope: Dict[str, Any], error: str) -> None:
         item = {**envelope, "error": error[:2000], "failed_at": time.time()}

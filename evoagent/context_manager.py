@@ -228,9 +228,13 @@ class ContextManager:
         self._fit_diff_payload(base, budget)
         compressed_tokens = estimate_tokens(base)
         base["compressed_estimated_tokens"] = compressed_tokens
+        base["raw_fallback"] = bool(
+            not base["compression"]["applied"] and compressed_tokens >= original_tokens
+        )
+        effective_tokens = original_tokens if base["raw_fallback"] else compressed_tokens
         event = {
             "label": label, "source_sha256": base["source_sha256"],
-            "original_tokens": original_tokens, "compressed_tokens": compressed_tokens,
+            "original_tokens": original_tokens, "compressed_tokens": effective_tokens,
             "token_budget": budget, **base["compression"],
         }
         if context_key:
@@ -279,11 +283,16 @@ class ContextManager:
         max_output_tokens: int = 4000,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         system_tokens = estimate_tokens(system_prompt)
+        budget_input_limit = max(
+            512,
+            int(remaining_token_budget) - system_tokens - max(128, int(max_output_tokens)),
+        )
         hard_input_limit = max(
             512,
             min(
                 self.input_token_budget,
                 self.context_window_tokens - max(256, max_output_tokens) - system_tokens - 512,
+                budget_input_limit,
             ),
         )
         tools_tokens = estimate_tokens(tools)

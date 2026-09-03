@@ -22,6 +22,10 @@ class RuntimeCancelled(RuntimeError):
     """The owning task requested cancellation."""
 
 
+class ExecutionLeaseLost(RuntimeError):
+    """The task is no longer owned by this execution."""
+
+
 class ToolProtocolError(RuntimeError):
     """A tool request does not match the registered tool contract."""
 
@@ -143,7 +147,11 @@ class AgentRuntime:
         cancel_check: Optional[Callable[[], bool]] = None,
         event_sink: Optional[Callable[[RuntimeEvent], None]] = None,
         span_factory: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
-        non_retryable: Tuple[type, ...] = (ValueError, RuntimeCancelled, RuntimeBudgetExceeded),
+        non_retryable: Tuple[type, ...] = (
+            ValueError, RuntimeCancelled, RuntimeBudgetExceeded, ExecutionLeaseLost,
+        ),
+        execution_owner: str = "", execution_epoch: int = 0,
+        lease_check: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
         state = dict(initial_state)
         started = time.monotonic()
@@ -158,6 +166,9 @@ class AgentRuntime:
                 event_sink(RuntimeEvent(kind, node, steps, attempt, detail))
 
         def guard(node: str) -> None:
+            if lease_check and not lease_check():
+                emit("lease_lost", node)
+                raise ExecutionLeaseLost("task execution lease was lost")
             if cancel_check and cancel_check():
                 emit("cancelled", node)
                 raise RuntimeCancelled("Task was cancelled")
@@ -196,9 +207,13 @@ class AgentRuntime:
                         raise TypeError("runtime node %s must return a dict" % node.name)
                     state.update(output)
                     if checkpoint_store is not None and task_id and node.checkpoint:
-                        checkpoint_store.save_checkpoint(
-                            task_id, node.name, output, "completed", attempt
+                        saved = checkpoint_store.save_checkpoint(
+                            task_id, node.name, output, "completed", attempt,
+                            execution_owner=execution_owner,
+                            execution_epoch=execution_epoch,
                         )
+                        if saved is False:
+                            raise ExecutionLeaseLost("task execution lease was lost")
                     emit("node_completed", node.name, attempt, output_keys=sorted(output))
                     last_error = None
                     break
@@ -208,7 +223,9 @@ class AgentRuntime:
                     last_error = exc
                     if checkpoint_store is not None and task_id and node.checkpoint:
                         checkpoint_store.save_checkpoint(
-                            task_id, node.name, {}, "failed", attempt, str(exc)
+                            task_id, node.name, {}, "failed", attempt, str(exc),
+                            execution_owner=execution_owner,
+                            execution_epoch=execution_epoch,
                         )
                     emit(
                         "node_failed", node.name, attempt,

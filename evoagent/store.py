@@ -2,7 +2,7 @@ import hashlib
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from .models import ReviewReport, TaskState, TraceEvent
@@ -10,6 +10,10 @@ from .models import ReviewReport, TaskState, TraceEvent
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class ExecutionAttemptsExceeded(RuntimeError):
+    """The durable execution-attempt limit has been reached."""
 
 
 class TaskStore:
@@ -141,6 +145,10 @@ class TaskStore:
             )
             self._ensure_column(conn, "tasks", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             self._ensure_column(conn, "tasks", "cancel_requested", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "tasks", "execution_owner", "TEXT")
+            self._ensure_column(conn, "tasks", "execution_epoch", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "tasks", "lease_expires_at", "TEXT")
+            self._ensure_column(conn, "tasks", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "installations", "tenant_id", "TEXT NOT NULL DEFAULT 'default'")
             conn.execute(
                 """CREATE TABLE IF NOT EXISTS checkpoints (
@@ -323,38 +331,140 @@ class TaskStore:
                  json.dumps(payload), now, now, tenant_id),
             )
 
-    def transition(self, task_id: str, event: TraceEvent) -> None:
+    def claim_execution(
+        self, task_id: str, owner: str, lease_seconds: int, max_attempts: int = 0,
+    ) -> Optional[int]:
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
+        with self._lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state,execution_owner,execution_epoch,lease_expires_at,attempt_count "
+                "FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if not row or row["state"] in {TaskState.SUCCESS.value, TaskState.CANCELLED.value}:
+                return None
+            lease = row["lease_expires_at"]
+            if row["execution_owner"] and lease:
+                try:
+                    if datetime.fromisoformat(lease) > now:
+                        return None
+                except (TypeError, ValueError):
+                    pass
+            if max_attempts and int(row["attempt_count"] or 0) >= int(max_attempts):
+                raise ExecutionAttemptsExceeded("task execution attempt limit was reached")
+            epoch = int(row["execution_epoch"] or 0) + 1
+            conn.execute(
+                "UPDATE tasks SET execution_owner=?,execution_epoch=?,lease_expires_at=?,"
+                "attempt_count=attempt_count+1,updated_at=? WHERE id=?",
+                (owner, epoch, expires, now.isoformat(), task_id),
+            )
+            return epoch
+
+    def reset_execution_attempts(self, task_id: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?",
-                (event.state.value, event.created_at, task_id),
-            )
-            conn.execute(
-                "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                (task_id, event.step, event.state.value, event.message, event.created_at),
+                "UPDATE tasks SET attempt_count=0 WHERE id=? AND state=?",
+                (task_id, TaskState.FAILED.value),
             )
 
-    def succeed(self, task_id: str, report: ReviewReport, event: TraceEvent) -> None:
+    def renew_execution(
+        self, task_id: str, owner: str, epoch: int, lease_seconds: int,
+    ) -> bool:
+        now = datetime.now(timezone.utc)
+        expires = (now + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "UPDATE tasks SET state = ?, report_json = ?, updated_at = ? WHERE id = ?",
-                (TaskState.SUCCESS.value, json.dumps(report.to_dict(), ensure_ascii=False), event.created_at, task_id),
+            cursor = conn.execute(
+                "UPDATE tasks SET lease_expires_at=? WHERE id=? AND execution_owner=? "
+                "AND execution_epoch=? AND lease_expires_at>?",
+                (expires, task_id, owner, int(epoch), now.isoformat()),
             )
-            conn.execute(
-                "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
-                (task_id, event.step, event.state.value, event.message, event.created_at),
-            )
+            return cursor.rowcount == 1
 
-    def fail(self, task_id: str, error: str, event: TraceEvent) -> None:
+    def owns_execution(self, task_id: str, owner: str, epoch: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM tasks WHERE id=? AND execution_owner=? "
+                "AND execution_epoch=? AND lease_expires_at>?",
+                (task_id, owner, int(epoch), utc_now()),
+            ).fetchone()
+            return bool(row)
+
+    def transition(
+        self, task_id: str, event: TraceEvent, execution_owner: str = "",
+        execution_epoch: int = 0,
+    ) -> bool:
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "UPDATE tasks SET state = ?, error = ?, updated_at = ? WHERE id = ?",
-                (TaskState.FAILED.value, error[:2000], event.created_at, task_id),
-            )
+            query = "UPDATE tasks SET state = ?, updated_at = ? WHERE id = ?"
+            params = [event.state.value, event.created_at, task_id]
+            if execution_owner:
+                query += (
+                    " AND execution_owner = ? AND execution_epoch = ? "
+                    "AND lease_expires_at > ?"
+                )
+                params.extend([execution_owner, int(execution_epoch), utc_now()])
+            cursor = conn.execute(query, params)
+            if cursor.rowcount != 1:
+                return False
             conn.execute(
                 "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
                 (task_id, event.step, event.state.value, event.message, event.created_at),
             )
+            return True
+
+    def succeed(
+        self, task_id: str, report: ReviewReport, event: TraceEvent,
+        execution_owner: str = "", execution_epoch: int = 0,
+    ) -> bool:
+        with self._lock, self._connect() as conn:
+            query = (
+                "UPDATE tasks SET state = ?, report_json = ?, error = NULL, updated_at = ?, "
+                "execution_owner = NULL, lease_expires_at = NULL WHERE id = ?"
+            )
+            params = [
+                TaskState.SUCCESS.value, json.dumps(report.to_dict(), ensure_ascii=False),
+                event.created_at, task_id,
+            ]
+            if execution_owner:
+                query += (
+                    " AND execution_owner = ? AND execution_epoch = ? "
+                    "AND lease_expires_at > ?"
+                )
+                params.extend([execution_owner, int(execution_epoch), utc_now()])
+            cursor = conn.execute(query, params)
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (task_id, event.step, event.state.value, event.message, event.created_at),
+            )
+            return True
+
+    def fail(
+        self, task_id: str, error: str, event: TraceEvent,
+        execution_owner: str = "", execution_epoch: int = 0,
+    ) -> bool:
+        with self._lock, self._connect() as conn:
+            query = (
+                "UPDATE tasks SET state = ?, error = ?, updated_at = ?, execution_owner = NULL, "
+                "lease_expires_at = NULL WHERE id = ?"
+            )
+            params = [TaskState.FAILED.value, error[:2000], event.created_at, task_id]
+            if execution_owner:
+                query += (
+                    " AND execution_owner = ? AND execution_epoch = ? "
+                    "AND lease_expires_at > ?"
+                )
+                params.extend([execution_owner, int(execution_epoch), utc_now()])
+            cursor = conn.execute(query, params)
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                "INSERT INTO trace_events(task_id, step, state, message, created_at) VALUES (?, ?, ?, ?, ?)",
+                (task_id, event.step, event.state.value, event.message, event.created_at),
+            )
+            return True
 
     def get(self, task_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
@@ -374,6 +484,10 @@ class TaskStore:
                 "FROM agent_messages WHERE task_id=? ORDER BY id", (task_id,)
             ).fetchall()
         value = dict(row)
+        for key in (
+            "execution_owner", "execution_epoch", "lease_expires_at", "attempt_count",
+        ):
+            value.pop(key, None)
         value["input"] = json.loads(value.pop("input_json"))
         report_json = value.pop("report_json")
         value["report"] = json.loads(report_json) if report_json else None
@@ -831,9 +945,18 @@ class TaskStore:
 
     def save_checkpoint(
         self, task_id: str, node: str, state: Dict[str, Any], status: str = "completed",
-        attempt: int = 1, error: str = "",
-    ) -> None:
+        attempt: int = 1, error: str = "", execution_owner: str = "",
+        execution_epoch: int = 0,
+    ) -> bool:
         with self._lock, self._connect() as conn:
+            if execution_owner:
+                row = conn.execute(
+                    "SELECT 1 FROM tasks WHERE id=? AND execution_owner=? AND execution_epoch=? "
+                    "AND lease_expires_at>?",
+                    (task_id, execution_owner, int(execution_epoch), utc_now()),
+                ).fetchone()
+                if not row:
+                    return False
             conn.execute(
                 "INSERT INTO checkpoints(task_id,node,status,attempt,state_json,error,updated_at) "
                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT(task_id,node) DO UPDATE SET "
@@ -842,6 +965,7 @@ class TaskStore:
                 (task_id, node, status, attempt, json.dumps(state, ensure_ascii=False),
                  error[:2000] or None, utc_now()),
             )
+            return True
 
     def load_checkpoints(self, task_id: str) -> Dict[str, Dict[str, Any]]:
         with self._connect() as conn:
@@ -899,16 +1023,30 @@ class TaskStore:
             row = conn.execute("SELECT cancel_requested FROM tasks WHERE id=?", (task_id,)).fetchone()
         return bool(row and row["cancel_requested"])
 
-    def cancel(self, task_id: str, event: TraceEvent) -> None:
+    def cancel(
+        self, task_id: str, event: TraceEvent, execution_owner: str = "",
+        execution_epoch: int = 0,
+    ) -> bool:
         with self._lock, self._connect() as conn:
-            conn.execute(
-                "UPDATE tasks SET state=?,updated_at=? WHERE id=?",
-                (TaskState.CANCELLED.value, event.created_at, task_id),
+            query = (
+                "UPDATE tasks SET state=?,updated_at=?,execution_owner=NULL,"
+                "lease_expires_at=NULL WHERE id=?"
             )
+            params = [TaskState.CANCELLED.value, event.created_at, task_id]
+            if execution_owner:
+                query += (
+                    " AND execution_owner=? AND execution_epoch=? "
+                    "AND lease_expires_at>?"
+                )
+                params.extend([execution_owner, int(execution_epoch), utc_now()])
+            cursor = conn.execute(query, params)
+            if cursor.rowcount != 1:
+                return False
             conn.execute(
                 "INSERT INTO trace_events(task_id,step,state,message,created_at) VALUES (?,?,?,?,?)",
                 (task_id, event.step, event.state.value, event.message, event.created_at),
             )
+            return True
 
     def claim_webhook(
         self, delivery_id: str, tenant_id: str, event_type: str, payload_sha256: str,

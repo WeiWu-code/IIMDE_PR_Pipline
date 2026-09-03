@@ -1,4 +1,6 @@
 import hashlib
+import socket
+import threading
 import uuid
 from typing import Any, Dict, Optional
 
@@ -25,8 +27,8 @@ from .reviewer import (
 )
 from .skills import AgentSkill, SkillRegistry
 from .skill_evolution import AgentSkillReplayReviewer, SkillEvolutionEngine, validate_artifact
-from .store import utc_now
-from .task_queue import PermanentTaskError, TaskQueue
+from .store import ExecutionAttemptsExceeded, utc_now
+from .task_queue import PermanentTaskError, TaskExecutionActive, TaskQueue
 from .rollout import ReleaseManager
 from .verifier import RepairVerifier
 
@@ -184,9 +186,57 @@ class ReviewService:
 
     def _run_review(
         self, task_id: str, repository: str, pull_request: Optional[int],
+        diff: str, tenant_id: str, execution_owner: str = "",
+        execution_epoch: int = 0,
+    ):
+        return self.harness.run(
+            task_id, repository, pull_request, diff, tenant_id,
+            execution_owner, execution_epoch,
+        )
+
+    def _execute_owned_review(
+        self, task_id: str, repository: str, pull_request: Optional[int],
         diff: str, tenant_id: str,
     ):
-        return self.harness.run(task_id, repository, pull_request, diff, tenant_id)
+        owner = "%s-%s" % (socket.gethostname(), uuid.uuid4().hex)
+        try:
+            epoch = self.store.claim_execution(
+                task_id, owner, self.settings.queue_lease_seconds,
+                self.settings.queue_max_attempts,
+            )
+        except ExecutionAttemptsExceeded as exc:
+            raise PermanentTaskError(str(exc)) from exc
+        if epoch is None:
+            current = self.store.get(task_id, tenant_id) or {}
+            if current.get("state") == TaskState.SUCCESS.value and current.get("report"):
+                return self.harness.run(
+                    task_id, repository, pull_request, diff, tenant_id,
+                )
+            if current.get("state") == TaskState.CANCELLED.value:
+                raise PermanentTaskError("task was cancelled")
+            raise TaskExecutionActive("task is already owned by another worker")
+
+        stop = threading.Event()
+        interval = max(0.1, min(self.settings.queue_lease_seconds / 3.0, 30.0))
+
+        def heartbeat() -> None:
+            while not stop.wait(interval):
+                if not self.store.renew_execution(
+                    task_id, owner, epoch, self.settings.queue_lease_seconds,
+                ):
+                    return
+
+        thread = threading.Thread(
+            target=heartbeat, name="evoagent-lease-%s" % task_id[:8], daemon=True,
+        )
+        thread.start()
+        try:
+            return self._run_review(
+                task_id, repository, pull_request, diff, tenant_id, owner, epoch,
+            )
+        finally:
+            stop.set()
+            thread.join(timeout=1)
 
     def reload_skills(self) -> list:
         if self.llm_config:
@@ -294,7 +344,7 @@ class ReviewService:
                 "review", task_id, task_id=task_id, tenant_id=tenant_id,
                 repository=repository,
             ), metrics.timer("review_duration"):
-                report = self._run_review(
+                report = self._execute_owned_review(
                     task_id, repository, pull_request, diff, tenant_id
                 )
             metrics.inc("reviews_total")
@@ -363,7 +413,7 @@ class ReviewService:
             with self.observability.span(
                 "review.async", task_id, task_id=task_id, tenant_id=tenant_id,
             ), metrics.timer("review_duration"):
-                report = self._run_review(
+                report = self._execute_owned_review(
                     task_id, payload["repository"], payload.get("pull_request"), diff,
                     tenant_id,
                 )
@@ -376,6 +426,8 @@ class ReviewService:
                     payload["github_issue_url"], to_markdown(report.to_dict()),
                     "<!-- evoagent-review:%s -->" % task_id,
                 )
+        except TaskExecutionActive:
+            raise
         except Exception:
             metrics.inc("reviews_failed_total")
             lane = (task.get("input") or {}).get("release_lane", "stable")
@@ -507,12 +559,25 @@ class ReviewService:
         diff = self.store.get_task_payload(task_id)
         if diff is None:
             raise ValueError("task payload is no longer available")
+        self.store.reset_execution_attempts(task_id)
         self.queue.submit({
             "task_id": task_id, "repository": task["repository"],
             "pull_request": task.get("pull_request"),
             "tenant_id": task.get("tenant_id", "default"),
         }, message_id=task_id)
         return {"task_id": task_id, "state": "PENDING", "resumed": True}
+
+    def replay_dead_letter(self, message_id: str) -> bool:
+        item = next((
+            value for value in self.queue.dead_letters(500)
+            if value.get("message_id") == message_id
+        ), None)
+        if not item:
+            return False
+        task_id = str((item.get("payload") or {}).get("task_id", ""))
+        if task_id:
+            self.store.reset_execution_attempts(task_id)
+        return self.queue.replay_dead_letter(message_id)
 
     def cancel_task(self, task_id: str, tenant_id: Optional[str] = None) -> bool:
         return self.store.request_cancel(task_id, tenant_id)

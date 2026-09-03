@@ -26,6 +26,7 @@ class JsonChatClient:
         self, role: str, system: str, user: str,
         ledger: Optional[ExecutionLedger] = None,
         max_tokens: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -51,7 +52,10 @@ class JsonChatClient:
         )
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            request_timeout = self.timeout
+            if timeout_seconds is not None:
+                request_timeout = max(1.0, min(float(timeout_seconds), float(self.timeout)))
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
             content = body["choices"][0]["message"]["content"]
             result = json.loads(content)

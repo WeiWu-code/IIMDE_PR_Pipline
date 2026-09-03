@@ -88,6 +88,8 @@ class RepositoryToolSuite:
         })
 
     def search_repository(self, query: str, limit: int = 50) -> dict:
+        if not self.root:
+            raise ValueError("repository checkout is unavailable for this review")
         query = str(query).strip()
         if not query:
             raise ValueError("query is required")
@@ -139,6 +141,8 @@ class RepositoryToolSuite:
         return _evidence("changed_line", payload)
 
     def symbol(self, name: str) -> dict:
+        if not self.root:
+            raise ValueError("repository checkout is unavailable for this review")
         name = str(name).strip()
         if not name:
             raise ValueError("symbol name is required")
@@ -179,6 +183,8 @@ class RepositoryToolSuite:
         })
 
     def locate_tests(self, path: str = "", symbol: str = "") -> dict:
+        if not self.root:
+            raise ValueError("repository checkout is unavailable for this review")
         tokens = {str(symbol).lower()} if symbol else set()
         if path:
             stem = Path(str(path)).stem.lower()
@@ -195,6 +201,8 @@ class RepositoryToolSuite:
         return _evidence("locate_tests", candidates[:100])
 
     def read_project_controls(self) -> dict:
+        if not self.root:
+            raise ValueError("repository checkout is unavailable for this review")
         selected = []
         for relative in self._files():
             parts = set(relative.split("/"))
@@ -406,6 +414,8 @@ class RepositoryToolSuite:
             ),
         }
         selected = allowed or set(specs)
+        if not self.root:
+            selected = set(selected).intersection({"search_diff", "changed_line"})
         tools = []
         for name in sorted(selected.intersection(specs)):
             description, schema, handler = specs[name]

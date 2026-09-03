@@ -6,7 +6,8 @@ from .diff_parser import ParsedDiff, parse_unified_diff
 from .models import ChangedLine, Finding, ReviewReport, Severity, TaskState, TraceEvent
 from .reviewer import Reviewer
 from .runtime import (
-    AgentRuntime, RuntimeBudgetExceeded, RuntimeCancelled, RuntimeNode,
+    AgentRuntime, ExecutionLeaseLost, RuntimeBudgetExceeded, RuntimeCancelled,
+    RuntimeNode,
 )
 from .store import TaskStore, utc_now
 
@@ -53,7 +54,8 @@ class ReviewHarness:
 
     def run(
         self, task_id: str, repository: str, pull_request: Optional[int], diff: str,
-        tenant_id: str = "default",
+        tenant_id: str = "default", execution_owner: str = "",
+        execution_epoch: int = 0,
     ) -> ReviewReport:
         task = self.store.get(task_id)
         if task and task.get("state") == TaskState.SUCCESS.value and task.get("report"):
@@ -64,6 +66,8 @@ class ReviewHarness:
         }
         self._ctx.step = max([item["step"] for item in (task or {}).get("trace", [])] or [0])
         self._ctx.task_id = task_id
+        self._ctx.execution_owner = execution_owner
+        self._ctx.execution_epoch = int(execution_epoch)
         checkpoints = self.store.load_checkpoints(task_id)
         self._ctx.state = TaskState.PENDING
         if checkpoints.get("planning", {}).get("status") == "completed":
@@ -82,26 +86,44 @@ class ReviewHarness:
                 ],
                 task_id=task_id, checkpoint_store=self.store,
                 cancel_check=lambda: self.store.is_cancelled(task_id),
+                lease_check=(
+                    lambda: self.store.owns_execution(
+                        task_id, execution_owner, execution_epoch,
+                    )
+                ) if execution_owner else None,
                 span_factory=self._span,
+                execution_owner=execution_owner,
+                execution_epoch=execution_epoch,
             )
             report = self._report_from_dict(result["report"])
+            if self.store.is_cancelled(task_id):
+                raise TaskCancelled("Task was cancelled")
             self._ctx.step += 1
-            self.store.succeed(
+            saved = self.store.succeed(
                 task_id, report,
                 TraceEvent(self._ctx.step, TaskState.SUCCESS, "Review completed", utc_now()),
+                execution_owner, execution_epoch,
             )
+            if saved is False:
+                raise ExecutionLeaseLost("task execution lease was lost")
             return report
         except TaskCancelled as exc:
             self._ctx.step += 1
-            self.store.cancel(
-                task_id, TraceEvent(self._ctx.step, TaskState.CANCELLED, str(exc), utc_now())
+            cancelled = self.store.cancel(
+                task_id, TraceEvent(self._ctx.step, TaskState.CANCELLED, str(exc), utc_now()),
+                execution_owner, execution_epoch,
             )
+            if cancelled is False:
+                raise ExecutionLeaseLost("task execution lease was lost") from exc
+            raise
+        except ExecutionLeaseLost:
             raise
         except Exception as exc:
             self._ctx.step += 1
             self.store.fail(
                 task_id, str(exc),
                 TraceEvent(self._ctx.step, TaskState.FAILED, "Review failed: %s" % exc, utc_now()),
+                execution_owner, execution_epoch,
             )
             try:
                 self.store.record_failure_case(
@@ -113,9 +135,13 @@ class ReviewHarness:
 
     def resume(
         self, task_id: str, repository: str, pull_request: Optional[int], diff: str,
-        tenant_id: str = "default",
+        tenant_id: str = "default", execution_owner: str = "",
+        execution_epoch: int = 0,
     ) -> ReviewReport:
-        return self.run(task_id, repository, pull_request, diff, tenant_id)
+        return self.run(
+            task_id, repository, pull_request, diff, tenant_id,
+            execution_owner, execution_epoch,
+        )
 
     def _planning(self, state: RuntimeState) -> Dict[str, Any]:
         parsed = parse_unified_diff(state["diff"])
@@ -134,6 +160,8 @@ class ReviewHarness:
             contextual(
                 state["task_id"], state["diff"], parsed,
                 repository=state["repository"], tenant_id=state.get("tenant_id", "default"),
+                execution_owner=self._ctx.execution_owner,
+                execution_epoch=self._ctx.execution_epoch,
             )
             if contextual else self.reviewer.review(state["diff"], parsed)
         )
@@ -170,17 +198,25 @@ class ReviewHarness:
 
     def _transition(self, target: TaskState, message: str) -> None:
         if target == self._ctx.state:
+            if self._ctx.execution_owner and not self.store.owns_execution(
+                self._ctx.task_id, self._ctx.execution_owner,
+                self._ctx.execution_epoch,
+            ):
+                raise ExecutionLeaseLost("task execution lease was lost")
             return
         if target not in ALLOWED.get(self._ctx.state, set()):
             raise RuntimeError(
                 "invalid state transition: %s -> %s" % (self._ctx.state.value, target.value)
             )
         self._ctx.step += 1
-        self._ctx.state = target
-        self.store.transition(
+        changed = self.store.transition(
             self._ctx.task_id,
             TraceEvent(self._ctx.step, target, message, utc_now()),
+            self._ctx.execution_owner, self._ctx.execution_epoch,
         )
+        if changed is False:
+            raise ExecutionLeaseLost("task execution lease was lost")
+        self._ctx.state = target
 
     def _span(self, name: str, attributes: Dict[str, Any]):
         if self.observability:

@@ -464,7 +464,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/v1/queue/dead-letters/replay":
                 principal = self._principal("manage")
                 payload = self._read_json(body)
-                ok = self.service.queue.replay_dead_letter(
+                ok = self.service.replay_dead_letter(
                     str(payload.get("message_id", ""))
                 )
                 self._send_json(202 if ok else 404, {"replayed": ok})

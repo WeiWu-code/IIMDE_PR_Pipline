@@ -118,8 +118,8 @@ class Settings:
     alert_smtp_host: str = ""
     alert_email_to: str = ""
     continuous_eval_seconds: int = 0
-    agent_token_budget: int = 8000
-    agent_time_budget_seconds: int = 60
+    agent_token_budget: int = 16000
+    agent_time_budget_seconds: int = 90
     agent_context_window_tokens: int = 32768
     agent_context_input_tokens: int = 20000
     context_diff_token_budget: int = 12000
@@ -233,7 +233,7 @@ class Settings:
             db_path=os.getenv("EVOAGENT_DB_PATH", "evoagent.db"),
             max_diff_bytes=_int("EVOAGENT_MAX_DIFF_BYTES", 1024 * 1024),
             max_steps=_int("EVOAGENT_MAX_STEPS", 8),
-            timeout_seconds=_int("EVOAGENT_TIMEOUT_SECONDS", 120),
+            timeout_seconds=_int("EVOAGENT_TIMEOUT_SECONDS", 300),
             llm_base_url=os.getenv("EVOAGENT_LLM_BASE_URL", "").rstrip("/"),
             llm_api_key=os.getenv("EVOAGENT_LLM_API_KEY", ""),
             llm_model=os.getenv("EVOAGENT_LLM_MODEL", ""),
@@ -287,8 +287,8 @@ class Settings:
             continuous_eval_seconds=_non_negative_int(
                 "EVOAGENT_CONTINUOUS_EVAL_SECONDS", 0
             ),
-            agent_token_budget=_int("EVOAGENT_AGENT_TOKEN_BUDGET", 8000),
-            agent_time_budget_seconds=_int("EVOAGENT_AGENT_TIME_BUDGET_SECONDS", 60),
+            agent_token_budget=_int("EVOAGENT_AGENT_TOKEN_BUDGET", 16000),
+            agent_time_budget_seconds=_int("EVOAGENT_AGENT_TIME_BUDGET_SECONDS", 90),
             agent_context_window_tokens=_int(
                 "EVOAGENT_AGENT_CONTEXT_WINDOW_TOKENS", 32768
             ),
