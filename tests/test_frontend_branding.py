@@ -13,4 +13,5 @@ def test_frontend_uses_xidian_branding_and_light_console_theme():
     assert (ROOT / "web" / "assets" / "xidian-logo-on.png").is_file()
     assert 'color-scheme: light' in CSS
     assert '--accent: #1f5fbf' in CSS
+    assert 'radial-gradient(circle at 92% -10%' not in CSS
     assert 'xidian-logo-on.png' in API

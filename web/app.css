@@ -823,9 +823,7 @@ textarea { min-height: 150px; resize: vertical; font: 11px/1.7 "Cascadia Code", 
 
 /* Xidian light console theme */
 body {
-  background:
-    radial-gradient(circle at 92% -10%, rgba(44, 117, 220, .09), transparent 28rem),
-    var(--bg);
+  background: var(--bg);
 }
 
 * { scrollbar-color: #b8c8da #edf2f7; }
