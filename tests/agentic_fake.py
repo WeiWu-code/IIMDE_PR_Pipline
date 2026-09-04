@@ -32,7 +32,7 @@ class FakeAgenticClient:
                             "objective": "Review correctness and reliability",
                             "skills": skills,
                         },
-                    ],
+                    ], "risk_level": "normal",
                 }
             if task["phase"] == "assess-workers":
                 return {
@@ -86,6 +86,6 @@ class FakeAgenticClient:
 
 def enable_agentic_service(service):
     service.chat_client = FakeAgenticClient()
-    service.reviewer = service._build_mode_router()
+    service.reviewer = service._build_agentic_reviewer()
     service.harness.reviewer = service.reviewer
     return service

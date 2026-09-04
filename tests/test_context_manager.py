@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from evoagent.agentic_core import ModeRouterReviewer
+from evoagent.agentic_core import AgenticReviewer
 from evoagent.context_manager import ContextManager, estimate_tokens
 from evoagent.diff_parser import parse_unified_diff
 from evoagent.memory import MemoryManager
@@ -51,7 +51,7 @@ class CapturingClient:
                 "assignment_id": "security-1", "worker": "security",
                 "objective": "Review authentication and dynamic execution.",
                 "files": ["src/auth.py"], "risk_domains": ["authorization"],
-            }]}
+            }], "risk_level": "high"}
         if role == "lead" and task["phase"] == "assess-workers":
             return {
                 "action": "final", "revision_requests": [],
@@ -161,7 +161,7 @@ class ContextMemoryIntegrationTests(unittest.TestCase):
             context_window_tokens=6000, input_token_budget=4000,
             diff_token_budget=1200,
         )
-        reviewer = ModeRouterReviewer(
+        reviewer = AgenticReviewer(
             self.store, client, memory_manager=memory, context_manager=manager,
         )
 

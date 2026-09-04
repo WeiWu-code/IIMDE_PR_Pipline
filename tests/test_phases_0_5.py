@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from evoagent.agentic_core import ModeRouterReviewer
+from evoagent.agentic_core import AgenticReviewer
 from evoagent.config import Settings
 from evoagent.diff_parser import parse_unified_diff
 from evoagent.evaluation_v2 import validate_real_dataset
@@ -122,12 +122,13 @@ class PhaseImplementationTests(unittest.TestCase):
             "mode": "agentic",
             "enabled_agents": ["lead", "security", "correctness-reliability", "critic"],
         })
-        reviewer = ModeRouterReviewer(store, FakeChatClient())
+        reviewer = AgenticReviewer(store, FakeChatClient())
         parsed = parse_unified_diff(DIFF)
         findings = reviewer.review_with_context("task", DIFF, parsed, "org/repo")
         summary = reviewer.collaboration_summary("task")
         self.assertEqual(["SEC-EVAL"], [item.rule_id for item in findings])
         self.assertEqual(6, summary["execution"]["llm_calls"])
+        self.assertEqual("high", summary["collaboration"]["risk_level"])
         self.assertEqual(
             ["lead", "security", "correctness-reliability", "critic"],
             summary["collaboration"]["roles"],

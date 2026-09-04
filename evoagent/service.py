@@ -2,7 +2,7 @@ import hashlib
 import uuid
 from typing import Any, Dict, Optional
 
-from .agentic_core import ModeRouterReviewer
+from .agentic_core import AgenticReviewer
 from .auth import AuthManager
 from .config import Settings
 from .context_manager import ContextManager
@@ -74,7 +74,7 @@ class ReviewService:
                 settings.timeout_seconds, dict(self.llm_config.get("headers") or {}),
             ) if self.llm_config else None
         )
-        self.reviewer = self._build_mode_router()
+        self.reviewer = self._build_agentic_reviewer()
         self.harness = ReviewHarness(
             self.store, self.reviewer, settings.max_steps, settings.timeout_seconds,
             observability=self.observability,
@@ -141,7 +141,7 @@ class ReviewService:
             extra_headers=dict(self.llm_config.get("headers") or {}),
         )
 
-    def _build_mode_router(self) -> ModeRouterReviewer:
+    def _build_agentic_reviewer(self) -> AgenticReviewer:
         enabled = {
             item.strip() for item in self.settings.enabled_agents.split(",") if item.strip()
         }
@@ -162,7 +162,7 @@ class ReviewService:
                 structured_config = (
                     run["metrics"]["structured_candidate"].get("candidate") or {}
                 )
-        return ModeRouterReviewer(
+        return AgenticReviewer(
             self.store, self.chat_client,
             self.settings.agent_token_budget,
             self.settings.agent_time_budget_seconds,
@@ -198,7 +198,7 @@ class ReviewService:
             )
         self.registry.reload()
         skills = self.registry.list()
-        self.reviewer = self._build_mode_router()
+        self.reviewer = self._build_agentic_reviewer()
         self.harness = ReviewHarness(
             self.store, self.reviewer, self.settings.max_steps, self.settings.timeout_seconds,
             observability=self.observability,

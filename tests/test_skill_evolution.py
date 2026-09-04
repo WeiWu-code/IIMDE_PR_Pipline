@@ -62,7 +62,7 @@ class SkillAwareClient:
                     "assignment_id": "security-1", "worker": "security",
                     "objective": "Review project-specific dangerous calls",
                     "skills": selected,
-                }]}
+                }], "risk_level": "normal"}
             if task["phase"] == "assess-workers":
                 return {"action": "final", "revision_requests": [], "critic_objective": "Verify"}
             if task["phase"] == "finalize":
@@ -167,7 +167,7 @@ class SkillEvolutionTests(unittest.TestCase):
         reviewer = AgentSkillReplayReviewer(artifact(), self.client)
         findings = reviewer.review(RISK_DIFF, parse_unified_diff(RISK_DIFF))
         self.assertEqual(["SEC-DANGEROUS-CALL"], [item.rule_id for item in findings])
-        summary = reviewer.router.collaboration_summary("skill-replay:review-dangerous-calls:1")
+        summary = reviewer.agentic.collaboration_summary("skill-replay:review-dangerous-calls:1")
         self.assertEqual(["review-dangerous-calls"], summary["collaboration"]["agent_skills"])
 
     def test_candidate_skill_md_replay_activates_and_persists(self):
@@ -210,7 +210,7 @@ class SkillEvolutionTests(unittest.TestCase):
             )
             service = ReviewService(settings)
             service.chat_client = self.client
-            service.reviewer = service._build_mode_router()
+            service.reviewer = service._build_agentic_reviewer()
             service.harness.reviewer = service.reviewer
             try:
                 self.assertIn(

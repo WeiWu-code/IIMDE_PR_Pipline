@@ -2,9 +2,9 @@
 
 This module deliberately uses a deterministic prompt-policy reviewer.  It proves
 that EvoAgent's feedback -> prompt version -> replay -> holdout -> activation
-loop changes agent behavior under controlled conditions.  It does not claim that
+loop changes agent behavior under controlled conditions. It does not claim that
 an unconfigured external LLM improved, and reports produced here are marked as
-synthetic-controlled.
+offline fixtures.
 """
 
 import hashlib
@@ -14,101 +14,31 @@ import re
 from typing import Any, Dict, Iterable, List, Set
 
 from .diff_parser import parse_unified_diff
-from .evaluation_benchmark import ContextRuleReviewer
 from .evaluation_harness import RULE_TO_CWE, dataset_fingerprint, load_jsonl, one_to_one_match
 from .evolution import DEFAULT_PROMPT, EvolutionEngine, RegressionEvaluator
 from .models import Finding
 from .reviewer import LocalRuleReviewer, Reviewer
+from .review_rules import ContextRuleReviewer
 from .store import TaskStore, utc_now
 
 
 FOCUS_RULE = re.compile(r"\[focus-rule:([A-Z][A-Z0-9_-]{1,79})\]")
 
 
-def generate_prompt_evolution_cases() -> List[dict]:
-    """Create a repository-disjoint corpus with unseen holdout instances.
+DEFAULT_PROMPT_DATASET = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),
+    "evaluation_data", "prompt_evolution_130.jsonl",
+))
 
-    Every repository contains the same risk families, but paths, literals and
-    whitespace differ.  Feedback is collected from repositories 1-8 only;
-    repositories 9-10 are never used to construct Prompt v2.
-    """
-    baseline_risks = [
-        ("SEC-EVAL", "critical", lambda n: "result = eval(payload_%s)" % n),
-        (
-            "SEC-SUBPROCESS-SHELL", "high",
-            lambda n: "subprocess.run(command_%s, shell=True)" % n,
-        ),
-        (
-            "SEC-HARDCODED-SECRET", "high",
-            lambda n: 'api_key = "production-secret-%s"' % n,
-        ),
-        ("REL-EMPTY-EXCEPT", "medium", lambda _n: "except Exception:"),
-    ]
-    adaptive_risks = [
-        (
-            "SEC-PATH-TRAVERSAL", "high",
-            lambda n: "return open(base%s/%suser_path).read()" % (" " * n, " " * n),
-        ),
-        (
-            "SEC-WEAK-HASH", "medium",
-            lambda n: "digest_%s = hashlib.md5(payload_%s).hexdigest()" % (n, n),
-        ),
-        ("REL-UNBOUNDED-RETRY", "medium", lambda _n: "while True:"),
-        (
-            "SEC-INSECURE-COOKIE", "medium",
-            lambda n: 'response.set_cookie("sid_%s", value, secure=False)' % n,
-        ),
-    ]
-    clean_lines = [
-        lambda n: "result = json.loads(payload_%s)" % n,
-        lambda n: "subprocess.run(command_%s, shell=False)" % n,
-        lambda n: "digest_%s = hashlib.sha256(payload_%s).hexdigest()" % (n, n),
-        lambda n: 'response.set_cookie("sid_%s", value, secure=True)' % n,
-        lambda _n: 'cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))',
-    ]
-    cases = []
-    case_number = 0
-    for repository_number in range(1, 11):
-        repository = "proof/service-%02d" % repository_number
-        split = "validation" if repository_number <= 8 else "holdout"
-        scenarios = [
-            (rule_id, severity, factory(repository_number))
-            for rule_id, severity, factory in baseline_risks + adaptive_risks
-        ]
-        scenarios.extend((None, None, factory(repository_number)) for factory in clean_lines)
-        for scenario_number, (rule_id, severity, line) in enumerate(scenarios, 1):
-            case_number += 1
-            path = "src/repo_%02d_case_%02d.py" % (repository_number, scenario_number)
-            expected = []
-            if rule_id:
-                expected.append({
-                    "path": path,
-                    "start_line": 1,
-                    "end_line": 1,
-                    "rule_id": rule_id,
-                    "cwe": RULE_TO_CWE[rule_id],
-                    "severity": severity,
-                })
-            cases.append({
-                "schema_version": 1,
-                "id": "prompt-evolution-%04d" % case_number,
-                "repository": repository,
-                "pull_request": 1000 + scenario_number,
-                "split": split,
-                "diff": (
-                    "--- a/%s\n+++ b/%s\n@@ -1 +1 @@\n-old_value\n+%s\n"
-                    % (path, path, line)
-                ),
-                "expected_findings": expected,
-                "after_files": {path: line + "\n"},
-                "repair_validation": {},
-                "source": {
-                    "kind": "synthetic-controlled",
-                    "generator": "prompt-evolution-proof-v1",
-                    "public_url": None,
-                },
-            })
-    return cases
+
+def load_prompt_evolution_cases(dataset_path: str = DEFAULT_PROMPT_DATASET) -> List[dict]:
+    """Load the checked-in 130-case prompt replay corpus."""
+    return load_jsonl(dataset_path)
+
+
+def generate_prompt_evolution_cases() -> List[dict]:
+    """Backward-compatible name for loading the pre-generated corpus."""
+    return load_prompt_evolution_cases()
 
 
 def write_jsonl(cases: Iterable[dict], path: str) -> None:

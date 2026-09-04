@@ -33,7 +33,16 @@ class ServiceTests(unittest.TestCase):
             ["lead", "security", "correctness-reliability", "critic"],
             result["report"]["collaboration"]["roles"],
         )
-        self.assertEqual(6, result["report"]["execution"]["llm_calls"])
+        self.assertEqual(5, result["report"]["execution"]["llm_calls"])
+        self.assertEqual("normal", result["report"]["collaboration"]["risk_level"])
+        role_calls = {}
+        for call in result["report"]["execution"]["model_call_log"]:
+            role_calls[call["role"]] = role_calls.get(call["role"], 0) + 1
+        self.assertEqual({
+            "lead": 2, "security": 1,
+            "correctness-reliability": 1, "critic": 1,
+        }, role_calls)
+        self.assertEqual(0, result["report"]["collaboration"]["revision_rounds"])
         self.assertGreater(result["report"]["execution"]["tool_calls"], 0)
         self.assertEqual([], task["collaboration"])
 

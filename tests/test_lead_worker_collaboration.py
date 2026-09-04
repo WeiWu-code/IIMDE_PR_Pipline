@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from evoagent.agentic_core import ModeRouterReviewer
+from evoagent.agentic_core import AgenticReviewer
 from evoagent.diff_parser import parse_unified_diff
 from evoagent.memory import MemoryManager
 from evoagent.store import TaskStore
@@ -42,7 +42,7 @@ class HierarchicalClient:
                             "worker": "correctness-reliability",
                             "objective": "Review failure and resource behavior.",
                         },
-                    ],
+                    ], "risk_level": "high",
                 }
             if task["phase"] == "assess-workers" and task["revision_round"] == 0:
                 return {
@@ -109,7 +109,7 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
 
     def test_lead_delegates_requests_revision_and_synthesizes(self):
         client = HierarchicalClient()
-        reviewer = ModeRouterReviewer(self.store, client)
+        reviewer = AgenticReviewer(self.store, client)
 
         findings = reviewer.review_with_context(
             "task", DIFF, parse_unified_diff(DIFF), "org/repo"
@@ -120,7 +120,15 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
         self.assertEqual("lead-workers", summary["collaboration"]["protocol"])
         self.assertEqual(2, client.security_calls)
         self.assertEqual(1, len(summary["collaboration"]["revision_results"]))
-        self.assertEqual("lead-final", summary["collaboration"]["stop_reason"])
+        self.assertEqual(
+            "high-risk-one-revision-round",
+            summary["collaboration"]["stop_reason"],
+        )
+        self.assertEqual(1, summary["collaboration"]["revision_rounds"])
+        self.assertEqual(
+            1, client.calls.count(("lead", "assess-workers"))
+        )
+        self.assertEqual(7, summary["execution"]["llm_calls"])
         session_events = {
             item["event"]
             for item in summary["execution"]["agent_traces"]["lead-session"]
@@ -135,11 +143,11 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
 
     def test_completed_session_resumes_without_repeating_agent_calls(self):
         first = HierarchicalClient()
-        ModeRouterReviewer(self.store, first).review_with_context(
+        AgenticReviewer(self.store, first).review_with_context(
             "task", DIFF, parse_unified_diff(DIFF), "org/repo"
         )
         resumed_client = HierarchicalClient()
-        resumed = ModeRouterReviewer(self.store, resumed_client)
+        resumed = AgenticReviewer(self.store, resumed_client)
 
         findings = resumed.review_with_context(
             "task", DIFF, parse_unified_diff(DIFF), "org/repo"
@@ -153,7 +161,7 @@ class LeadWorkerCollaborationTests(unittest.TestCase):
 
     def test_gate_decisions_are_archived_for_future_agent_recall(self):
         memory = MemoryManager(self.store)
-        reviewer = ModeRouterReviewer(self.store, HierarchicalClient(), memory_manager=memory)
+        reviewer = AgenticReviewer(self.store, HierarchicalClient(), memory_manager=memory)
 
         reviewer.review_with_context("task", DIFF, parse_unified_diff(DIFF), "org/repo")
 

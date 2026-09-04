@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 from .diff_parser import ParsedDiff
+from .finding_identity import canonical_cwe, canonical_identity
 from .models import Finding, Severity
 
 
@@ -92,6 +93,7 @@ class LocalRuleReviewer(Reviewer):
                     findings.append(
                         Finding(
                             rule_id=rule_id,
+                            cwe=canonical_cwe(rule_id),
                             severity=severity,
                             title=title,
                             explanation=explanation,
@@ -134,7 +136,7 @@ class DomainRuleReviewer(Reviewer):
                 if pattern.search(line.content) and identity not in seen:
                     seen.add(identity)
                     findings.append(Finding(
-                        rule_id=rule_id, severity=severity, title=title,
+                        rule_id=rule_id, cwe=canonical_cwe(rule_id), severity=severity, title=title,
                         explanation=explanation, path=line.path, line=line.line,
                         evidence=line.content.strip()[:240], fix=fix, test=test,
                         confidence=0.9,
@@ -189,7 +191,7 @@ class OpenAICompatibleReviewer(Reviewer):
         self, diff: str, parsed: ParsedDiff,
     ) -> List[Finding]:
         schema = (
-            'Return JSON only: {"findings":[{"rule_id":"...","severity":"critical|high|medium|low",'
+            'Return JSON only: {"findings":[{"cwe":"CWE-...","rule_id":"...","severity":"critical|high|medium|low",'
             '"title":"...","explanation":"...","path":"...","line":1,"evidence":"...",'
             '"fix":"...","test":"...","confidence":0.0}]}. Report only actionable defects introduced '
             "by added lines. Do not report style preferences. Line numbers must be new-file line numbers."
@@ -258,6 +260,7 @@ class OpenAICompatibleReviewer(Reviewer):
             findings.append(
                 Finding(
                     rule_id=str(raw.get("rule_id", "LLM-REVIEW"))[:80],
+                    cwe=str(raw.get("cwe", "")).strip().upper() or None,
                     severity=severity,
                     title=str(raw.get("title", "Review finding"))[:200],
                     explanation=str(raw.get("explanation", ""))[:2000],
@@ -285,7 +288,10 @@ class CompositeReviewer(Reviewer):
         for reviewer in self.reviewers:
             try:
                 for finding in reviewer.review(diff, parsed):
-                    key = (finding.path, finding.line, finding.rule_id)
+                    key = (
+                        finding.path, finding.line,
+                        canonical_identity(finding.rule_id, finding.cwe),
+                    )
                     merged[key] = finding
             except Exception as exc:
                 errors.append(exc)
