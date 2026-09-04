@@ -60,6 +60,9 @@ def public_taxonomy() -> Dict[str, Any]:
             ),
         },
         "run_modes": {
-            RunMode.AGENTIC.value: "A Lead LLM delegates to two specialists and a blind Critic worker.",
+            RunMode.AGENTIC.value: (
+                "A Lead delegates to Security and Correctness/Reliability workers, a blind "
+                "Critic verifies once, and the Lead performs final synthesis."
+            ),
         },
     }

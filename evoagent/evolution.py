@@ -6,6 +6,8 @@ import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from .diff_parser import parse_unified_diff
+from .evaluation_harness import one_to_one_match
+from .finding_identity import canonical_identity, is_valid_cwe
 from .store import utc_now
 
 
@@ -60,8 +62,9 @@ SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 class RegressionEvaluator:
     """Replay a fixed dataset against one prompt and compute objective review metrics."""
 
-    def __init__(self, reviewer_factory: Callable[[str], object]):
+    def __init__(self, reviewer_factory: Callable[[str], object], line_tolerance: int = 2):
         self.reviewer_factory = reviewer_factory
+        self.line_tolerance = max(0, int(line_tolerance))
 
     def run(self, prompt: str, cases: List[dict]) -> Dict[str, Any]:
         reviewer = self.reviewer_factory(prompt)
@@ -81,36 +84,48 @@ class RegressionEvaluator:
                 parsed = parse_unified_diff(case["diff"])
                 findings = reviewer.review(case["diff"], parsed)
                 predicted = {}
+                predicted_findings_by_key = {}
                 for finding in findings:
                     key = (finding.path, int(finding.line), finding.rule_id)
                     current = predicted.get(key)
                     severity = finding.severity.value
                     if current is None or SEVERITY_RANK[severity] > SEVERITY_RANK[current]:
                         predicted[key] = severity
+                        predicted_findings_by_key[key] = finding
                 predicted_total += len(predicted)
 
-                unmatched = set(predicted)
-                tp = severity_ok = high_hits = 0
-                for expected in expected_items:
-                    path = str(expected["path"])
-                    line = int(expected["line"])
-                    rule_id = str(expected.get("rule_id", "")).strip()
-                    minimum = str(expected.get("min_severity", "low")).lower()
-                    candidates = [
-                        key for key in unmatched
-                        if key[0] == path and key[1] == line and (not rule_id or key[2] == rule_id)
-                    ]
-                    if not candidates:
-                        continue
-                    selected = max(candidates, key=lambda key: SEVERITY_RANK[predicted[key]])
-                    unmatched.remove(selected)
-                    tp += 1
-                    severity_passed = SEVERITY_RANK[predicted[selected]] >= SEVERITY_RANK[minimum]
+                # Use the same canonical CWE/path/location matcher as the
+                # production accuracy harness. Legacy cases without a CWE or
+                # rule_id remain wildcard-by-location for compatibility.
+                match_expected = [
+                    {
+                        "path": item["path"],
+                        "start_line": int(item.get("line", item.get("start_line"))),
+                        "end_line": int(item.get("end_line", item.get("line", item.get("start_line")))),
+                        "cwe": canonical_identity(
+                            item.get("rule_id", ""), item.get("cwe", "")
+                        ) if item.get("rule_id") or item.get("cwe") else "",
+                    }
+                    for item in expected_items
+                ]
+                predicted_findings = [predicted_findings_by_key[key] for key in predicted]
+                matches = one_to_one_match(
+                    match_expected, predicted_findings,
+                    line_tolerance=self.line_tolerance,
+                )
+                matched_predicted = {item.predicted_index for item in matches}
+                tp = len(matches)
+                severity_ok = high_hits = 0
+                for match in matches:
+                    expected = expected_items[match.expected_index]
+                    finding = predicted_findings[match.predicted_index]
+                    minimum = str(expected.get("min_severity", expected.get("severity", "low"))).lower()
+                    severity_passed = SEVERITY_RANK[finding.severity.value] >= SEVERITY_RANK[minimum]
                     severity_ok += int(severity_passed)
                     if SEVERITY_RANK[minimum] >= SEVERITY_RANK["high"]:
                         high_hits += int(severity_passed)
 
-                fp = len(unmatched)
+                fp = len(predicted_findings) - len(matched_predicted)
                 fn = len(expected_items) - tp
                 true_positive += tp
                 false_positive += fp
@@ -247,17 +262,27 @@ class EvolutionEngine:
             if not isinstance(item, dict):
                 raise ValueError("each expected finding must be an object")
             try:
-                location = (str(item.get("path", "")), int(item.get("line", 0)))
+                path = str(item.get("path", ""))
+                start_line = int(item.get("line", item.get("start_line", 0)))
+                end_line = int(item.get("end_line", start_line))
             except (TypeError, ValueError) as exc:
                 raise ValueError("expected finding line must be an integer") from exc
-            if location not in valid_locations:
-                raise ValueError("expected finding must point to an added line: %s:%s" % location)
-            if str(item.get("min_severity", "low")).lower() not in SEVERITY_RANK:
+            if start_line > end_line:
+                raise ValueError("expected finding line range is inverted")
+            if not any(
+                changed_path == path and start_line <= changed_line <= end_line
+                for changed_path, changed_line in valid_locations
+            ):
+                raise ValueError("expected finding must point to an added line: %s:%s" % (path, start_line))
+            minimum = item.get("min_severity", item.get("severity", "low"))
+            if str(minimum).lower() not in SEVERITY_RANK:
                 raise ValueError("invalid min_severity")
             rule_id = str(item.get("rule_id", "")).strip()
             if "rule_id" in item and (not rule_id or len(rule_id) > 80):
                 raise ValueError("rule_id must be non-empty and at most 80 characters")
-            identity = location + (rule_id,)
+            if "cwe" in item and not is_valid_cwe(item.get("cwe")):
+                raise ValueError("cwe must use the CWE-<number> format")
+            identity = (path, start_line, end_line, rule_id)
             if identity in seen:
                 raise ValueError("duplicate expected finding: %s:%s:%s" % identity)
             seen.add(identity)

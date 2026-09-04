@@ -7,38 +7,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .diff_parser import parse_unified_diff
+from .finding_identity import RULE_TO_CWE, canonical_identity
 from .models import Finding, Severity
 from .reviewer import Reviewer
 from .verifier import RepairVerifier
 
 
 SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-
-# The evaluator compares CWE identities, not reviewer-specific rule names.
-RULE_TO_CWE = {
-    "SEC-EVAL": "CWE-95",
-    "SEC-SUBPROCESS-SHELL": "CWE-78",
-    "SEC-HARDCODED-SECRET": "CWE-798",
-    "SEC-SQL-CONCAT": "CWE-89",
-    "REL-EMPTY-EXCEPT": "CWE-703",
-    "REL-DEBUG-PRINT": "CWE-532",
-    "SEC-PATH-TRAVERSAL": "CWE-22",
-    "SEC-YAML-LOAD": "CWE-502",
-    "SEC-WEAK-HASH": "CWE-328",
-    "SEC-INSECURE-TEMPFILE": "CWE-377",
-    "SEC-WEAK-RANDOM": "CWE-330",
-    "REL-UNBOUNDED-RETRY": "CWE-835",
-    "SEC-ASSERT-AUTH": "CWE-617",
-    "SEC-INSECURE-COOKIE": "CWE-614",
-    "SEC-PICKLE-LOAD": "CWE-502",
-    "REL-FLOAT-MONEY": "CWE-682",
-    "REL-NAIVE-DATETIME": "CWE-367",
-    "REL-BLOCKING-ASYNC": "CWE-400",
-    "REL-NONATOMIC-WRITE": "CWE-362",
-    "SEC-OPEN-REDIRECT": "CWE-601",
-    "SEC-LOG-FORGING": "CWE-117",
-}
-
 
 @dataclass
 class Match:
@@ -123,12 +98,16 @@ def _candidate_edges(
         start = int(truth["start_line"])
         end = int(truth["end_line"])
         truth_path = _normalized_path(str(truth["path"]))
-        truth_cwe = str(truth["cwe"]).upper()
+        truth_identity = canonical_identity(
+            truth.get("rule_id", ""), truth.get("cwe", "")
+        )
         options = []
         for predicted_index, finding in enumerate(predicted):
             if _normalized_path(finding.path) != truth_path:
                 continue
-            if RULE_TO_CWE.get(finding.rule_id, finding.rule_id).upper() != truth_cwe:
+            if truth_identity and canonical_identity(
+                finding.rule_id, getattr(finding, "cwe", "")
+            ) != truth_identity:
                 continue
             if start <= finding.line <= end:
                 distance = 0
@@ -272,7 +251,7 @@ class EndToEndEvaluationHarness:
             self._accumulate(totals, result)
         metrics = self._metrics(totals)
         by_split = {}
-        for split in ("validation", "holdout"):
+        for split in ("train", "validation", "holdout"):
             selected = [item for item in case_results if item["split"] == split]
             split_totals = self._empty_totals()
             for item in selected:
@@ -356,7 +335,9 @@ class EndToEndEvaluationHarness:
                     "predicted_index": match.predicted_index,
                     "path": finding.path,
                     "line": finding.line,
-                    "cwe": RULE_TO_CWE.get(finding.rule_id, finding.rule_id),
+                    "cwe": canonical_identity(
+                        finding.rule_id, getattr(finding, "cwe", "")
+                    ),
                     "rule_id": finding.rule_id,
                     "expected_severity": truth["severity"],
                     "predicted_severity": finding.severity.value,

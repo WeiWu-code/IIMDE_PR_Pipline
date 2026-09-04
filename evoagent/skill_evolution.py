@@ -111,12 +111,15 @@ class AgentSkillReplayReviewer(Reviewer):
     """Replay a candidate through the product Lead/worker Skill runtime."""
 
     def __init__(self, artifact: dict, client, token_budget: int = 8000, time_budget_seconds: int = 60):
-        from .agentic_core import ModeRouterReviewer
+        from .agentic_core import AgenticReviewer
 
         self.skill = AgentSkill.from_artifact(artifact)
         self.name = "%s-agent-skill-replay" % self.skill.name
         self._sequence = 0
-        self.router = ModeRouterReviewer(
+        self._last_task_id = ""
+        self.token_budget = int(token_budget)
+        self.time_budget_seconds = int(time_budget_seconds)
+        self.agentic = AgenticReviewer(
             _ReplayTaskStore(self.skill.name), client,
             default_token_budget=token_budget,
             default_time_budget=time_budget_seconds,
@@ -124,10 +127,35 @@ class AgentSkillReplayReviewer(Reviewer):
         )
 
     def review(self, diff: str, parsed) -> list:
+        return self.review_case({"diff": diff, "repository": ""}, parsed)
+
+    def review_case(self, case: dict, parsed) -> list:
         self._sequence += 1
-        return self.router.review_with_context(
-            "skill-replay:%s:%d" % (self.skill.name, self._sequence), diff, parsed,
+        self._last_task_id = "skill-replay:%s:%d" % (self.skill.name, self._sequence)
+        return self.agentic.review_with_context(
+            self._last_task_id, case["diff"], parsed,
+            repository=str(case.get("repository_root") or case.get("repository") or ""),
         )
+
+    def evaluation_execution(self) -> dict:
+        return dict(
+            self.agentic.collaboration_summary(self._last_task_id).get("execution") or {}
+        )
+
+    def evaluation_collaboration(self) -> dict:
+        return dict(
+            self.agentic.collaboration_summary(self._last_task_id).get("collaboration") or {}
+        )
+
+    def evaluation_config(self) -> dict:
+        return {
+            "mode": "agentic", "roles": [
+                "lead", "security", "correctness-reliability", "critic",
+            ],
+            "skill": self.skill.name,
+            "per_role_token_budget": self.token_budget,
+            "per_role_time_budget_seconds": self.time_budget_seconds,
+        }
 
 
 class SkillEvolutionEngine:
@@ -151,6 +179,54 @@ class SkillEvolutionEngine:
     def empty_artifact(skill_name: str) -> dict:
         return validate_artifact(_default_skill_markdown(skill_name), skill_name)
 
+    @classmethod
+    def build_candidate_artifact(
+        cls, skill_name: str, base_artifact: dict, feedback: list,
+    ) -> dict:
+        """Pure artifact mutation used by controlled and production experiments.
+
+        Feedback must already contain concrete evidence; no task-store lookup is
+        performed here. This keeps experiment arms isolated and reproducible.
+        """
+        artifact = validate_artifact(base_artifact, skill_name)
+        content = artifact["files"]["SKILL.md"]
+        learned, removed, used = [], [], []
+        for index, case in enumerate(feedback):
+            finding = (case.get("payload") or {}).get("finding") or {}
+            rule_id = str(finding.get("rule_id", "")).strip().upper()
+            if not RULE_ID.fullmatch(rule_id):
+                continue
+            category = str(case.get("category", ""))
+            if category == "false_positive":
+                updated = cls._remove_learned_block(content, rule_id)
+                if updated != content:
+                    content = updated
+                    removed.append(rule_id)
+                    used.append(case.get("id", index))
+                continue
+            if category != "missed_issue":
+                continue
+            evidence = str(finding.get("evidence", "")).strip()
+            if not evidence or len(evidence) > 240 or "\n" in evidence or "\r" in evidence:
+                continue
+            if "evoagent:learned:%s:start" % rule_id in content:
+                continue
+            content = content.rstrip() + "\n\n" + cls._learned_block(
+                rule_id, finding, evidence,
+            )
+            learned.append(rule_id)
+            used.append(case.get("id", index))
+        candidate = validate_artifact({
+            "name": skill_name,
+            "files": {**artifact["files"], "SKILL.md": content},
+        }, skill_name)
+        return {
+            "artifact": candidate,
+            "learned_rule_ids": sorted(set(learned)),
+            "removed_rule_ids": sorted(set(removed)),
+            "used_feedback_ids": used,
+        }
+
     def _factory(self, serialized: str) -> Reviewer:
         if self.reviewer_factory is None:
             raise RuntimeError("Agent Skill replay requires a configured model")
@@ -160,7 +236,7 @@ class SkillEvolutionEngine:
     def _redact_holdout(metrics: dict) -> dict:
         return {key: value for key, value in metrics.items() if key not in {"case_results", "errors"}}
 
-    def _non_regressing(self, candidate: dict, baseline: dict) -> bool:
+    def metrics_non_regressing(self, candidate: dict, baseline: dict) -> bool:
         protected = ["score", "precision", "recall", "high_severity_recall", "success_rate"]
         if baseline.get("positive_cases", 0):
             protected.append("severity_accuracy")
@@ -170,6 +246,9 @@ class SkillEvolutionEngine:
             float(candidate.get(key, 0)) + self.max_metric_regression
             >= float(baseline.get(key, 0)) for key in protected
         )
+
+    def _non_regressing(self, candidate: dict, baseline: dict) -> bool:
+        return self.metrics_non_regressing(candidate, baseline)
 
     def status(self, skill_name: str = "evolved-review", tenant_id: str = "default") -> dict:
         validation = self.store.list_evaluation_cases("validation", True, self.max_cases)

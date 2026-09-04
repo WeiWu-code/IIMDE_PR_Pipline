@@ -657,7 +657,7 @@ class ContextManager:
             }, ensure_ascii=False, separators=(",", ":"))
 
         finding_keys = {
-            "finding_index", "rule_id", "severity", "title", "path", "line",
+            "finding_index", "cwe", "rule_id", "severity", "title", "path", "line",
             "evidence", "confidence", "accepted", "objections", "status",
             "assignment_id", "run_id", "worker", "revision_round",
         }
@@ -749,7 +749,7 @@ class ContextManager:
                 manifest[key] = [
                     {
                         name: item.get(name) for name in (
-                            "finding_index", "rule_id", "severity", "path", "line",
+                            "finding_index", "cwe", "rule_id", "severity", "path", "line",
                             "confidence", "accepted",
                         ) if name in item
                     }

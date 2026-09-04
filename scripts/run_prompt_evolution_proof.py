@@ -8,9 +8,8 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from evoagent.evolution_proof import (  # noqa: E402
-    generate_prompt_evolution_cases,
+    DEFAULT_PROMPT_DATASET,
     run_prompt_evolution_proof,
-    write_jsonl,
     write_report,
 )
 
@@ -25,11 +24,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
-    dataset_path = args.dataset or os.path.join(
-        args.output_dir, "prompt-evolution-cases.jsonl"
-    )
-    if not args.dataset:
-        write_jsonl(generate_prompt_evolution_cases(), dataset_path)
+    dataset_path = args.dataset or DEFAULT_PROMPT_DATASET
     database_path = os.path.join(args.output_dir, "prompt-evolution-proof.db")
     if os.path.exists(database_path):
         raise SystemExit(

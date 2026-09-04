@@ -51,6 +51,9 @@ class Finding:
     call_chain: List[Dict[str, Any]] = field(default_factory=list)
     source: str = "unknown"
     gate: Dict[str, Any] = field(default_factory=dict)
+    # Canonical taxonomy used for evaluation.  rule_id remains an internal or
+    # reviewer-specific label and is not required to be stable across models.
+    cwe: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)

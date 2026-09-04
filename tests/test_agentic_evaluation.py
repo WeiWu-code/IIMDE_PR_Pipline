@@ -2,7 +2,7 @@ import json
 import unittest
 
 from evoagent.diff_parser import parse_unified_diff
-from evoagent.evaluation_benchmark import ContextRuleReviewer
+from evoagent.review_rules import ContextRuleReviewer
 from evoagent.evaluation_v2 import (
     FairAblationSuite,
     ProductArmReviewer,
@@ -86,10 +86,11 @@ class AgenticEvaluationTests(unittest.TestCase):
         self.assertEqual(14, len(LocalRuleReviewer.RULES) + len(ContextRuleReviewer.RULES))
         expected_calls = {
             "multi-llm-no-critic": {
-                "lead": 3, "security": 1, "correctness-reliability": 1,
+                "lead": 2, "security": 1,
+                "correctness-reliability": 1,
             },
             "full-agentic": {
-                "lead": 3, "security": 1,
+                "lead": 2, "security": 1,
                 "correctness-reliability": 1, "critic": 1,
             },
         }
@@ -112,7 +113,7 @@ class AgenticEvaluationTests(unittest.TestCase):
                 "repository": "repo-%d" % index,
                 "pull_request": index,
                 "split": split,
-                "source": {"kind": "synthetic-controlled"},
+                "source": {"kind": "offline-fixture"},
                 "diff": DIFF,
                 "expected_findings": [{
                     "path": "app.py", "start_line": 1, "end_line": 1,
@@ -129,7 +130,10 @@ class AgenticEvaluationTests(unittest.TestCase):
         self.assertFalse(report["dataset"]["ready"])
         self.assertFalse(report["critic_gate"]["passed"])
         self.assertEqual(
-            {"lead": 9, "security": 3, "correctness-reliability": 3, "critic": 3},
+            {
+                "lead": 6, "security": 3,
+                "correctness-reliability": 3, "critic": 3,
+            },
             report["arms"]["full-agentic"]["execution"]["model_role_calls"],
         )
 
