@@ -10,6 +10,7 @@ const titles = {
 };
 
 const stateLabels = {
+  SUBMITTING: "提交中",
   PENDING: "等待中",
   PLANNING: "规划中",
   EXECUTING: "执行中",
@@ -19,10 +20,22 @@ const stateLabels = {
   CANCELLED: "已取消",
 };
 
+const terminalTaskStates = new Set(["SUCCESS", "FAILED", "CANCELLED"]);
+const runStages = [
+  { state: "PENDING", code: "QUEUE", title: "任务进入队列", idle: "接收输入并分配执行资源" },
+  { state: "PLANNING", code: "PLAN", title: "解析与规划", idle: "解析 Diff，确定文件与审查范围" },
+  { state: "EXECUTING", code: "AGENT", title: "Agent 协作审查", idle: "安全、可靠性与 Critic Agent 协同分析" },
+  { state: "REVIEWING", code: "GATE", title: "证据与质量门禁", idle: "校验证据、置信度和修复建议" },
+  { state: "SUCCESS", code: "REPORT", title: "生成审查报告", idle: "汇总结论并生成可执行报告" },
+];
+const runStateIndex = Object.fromEntries(runStages.map((stage, index) => [stage.state, index]));
+
 let selectedTask = null;
 let selectedTaskData = null;
 let accessToken = localStorage.getItem("evoagent_token") || "";
 let toastTimer = null;
+let reviewPollGeneration = 0;
+let taskPollGeneration = 0;
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 function escapeHtml(value) {
@@ -43,6 +56,192 @@ function formatTime(value) {
 
 function formatJson(value) {
   return JSON.stringify(value, null, 2);
+}
+
+function normalizeState(value) {
+  return String(value || "PENDING").toUpperCase();
+}
+
+function taskIdentity(task = {}) {
+  return task.id || task.task_id || "";
+}
+
+function latestTrace(task, state) {
+  return [...(task.trace || [])].reverse().find((item) => normalizeState(item.state) === state);
+}
+
+function formatTraceMessage(value) {
+  const message = String(value || "");
+  if (/^Input accepted; preparing review plan$/i.test(message)) return "输入已接收，正在生成审查计划";
+  const reviewingFiles = message.match(/^Reviewing (\d+) changed files?$/i);
+  if (reviewingFiles) return `正在审查 ${reviewingFiles[1]} 个变更文件`;
+  const rankingFindings = message.match(/^Validating and ranking (\d+) findings?$/i);
+  if (rankingFindings) return `正在验证并排序 ${rankingFindings[1]} 条候选结论`;
+  if (/^Review completed$/i.test(message)) return "审查完成，报告已生成";
+  if (/^Review failed:/i.test(message)) return message.replace(/^Review failed:/i, "审查失败：");
+  return message;
+}
+
+function taskProgressIndex(task = {}) {
+  const state = normalizeState(task.state);
+  if (state === "SUBMITTING") return 0;
+  if (runStateIndex[state] !== undefined) return runStateIndex[state];
+  const latestKnown = [...(task.trace || [])]
+    .reverse()
+    .find((item) => runStateIndex[normalizeState(item.state)] !== undefined);
+  return latestKnown ? runStateIndex[normalizeState(latestKnown.state)] : 0;
+}
+
+function stateTone(value) {
+  const state = normalizeState(value);
+  return Object.prototype.hasOwnProperty.call(stateLabels, state) ? state.toLowerCase() : "pending";
+}
+
+function riskTone(value) {
+  const risk = String(value || "unknown").toLowerCase();
+  return ["critical", "high", "medium", "low"].includes(risk) ? risk : "unknown";
+}
+
+function runStageDetail(stage, task = {}) {
+  const report = task.report || {};
+  const execution = report.execution || {};
+  if (["FAILED", "CANCELLED"].includes(normalizeState(task.state))
+      && stage.state === runStages[taskProgressIndex(task)]?.state
+      && task.error) {
+    return String(task.error);
+  }
+  const trace = latestTrace(task, stage.state);
+  if (stage.state === "SUCCESS" && normalizeState(task.state) === "SUCCESS" && report.summary) {
+    return report.summary;
+  }
+  if (trace?.message) return formatTraceMessage(trace.message);
+  if (stage.state === "PENDING") {
+    const id = taskIdentity(task);
+    if (normalizeState(task.state) === "SUBMITTING") return "正在创建审查任务…";
+    return id ? `${task.queue || "任务"} · ${id.slice(0, 8)}` : stage.idle;
+  }
+  if (stage.state === "EXECUTING" && task.collaboration?.length) {
+    return `${task.collaboration.length} 条 Agent 协作消息已记录`;
+  }
+  if (stage.state === "REVIEWING" && report.findings) {
+    return `${report.findings.length} 条候选结论进入质量门禁`;
+  }
+  if (stage.state === "SUCCESS" && normalizeState(task.state) === "SUCCESS") {
+    return report.summary || `${execution.llm_calls || 0} 次模型调用，报告已就绪`;
+  }
+  return stage.idle;
+}
+
+function renderRunMetric(label, value, tone = "") {
+  return `<span class="run-metric ${tone}"><small>${escapeHtml(label)}</small><b>${escapeHtml(value)}</b></span>`;
+}
+
+function renderRunGraph(task = {}, compact = false) {
+  const state = normalizeState(task.state);
+  const progress = taskProgressIndex(task);
+  const failed = state === "FAILED";
+  const cancelled = state === "CANCELLED";
+  const succeeded = state === "SUCCESS";
+  const report = task.report || {};
+  const execution = report.execution || {};
+  const id = taskIdentity(task);
+  const repository = task.repository || report.repository || "代码审查任务";
+  const statusClass = `state-${stateTone(state)}`;
+  const nodes = runStages.map((stage, index) => {
+    let nodeState = "pending";
+    if (succeeded || index < progress) nodeState = "done";
+    else if (index === progress) nodeState = failed ? "failed" : cancelled ? "cancelled" : "active";
+    const marker = nodeState === "done" ? "✓" : nodeState === "failed" ? "!" : nodeState === "cancelled" ? "×" : String(index + 1).padStart(2, "0");
+    const nodeLabel = nodeState === "done" ? "已完成" : nodeState === "active" ? "进行中" : nodeState === "failed" ? "失败" : nodeState === "cancelled" ? "已取消" : "等待";
+    return `<div class="run-node is-${nodeState}">
+      <span class="run-node-marker" data-code="${stage.code}">${marker}</span>
+      <span class="run-node-copy">
+        <strong>${escapeHtml(stage.title)}</strong>
+        <small>${escapeHtml(runStageDetail(stage, task))}</small>
+      </span>
+      <em>${nodeLabel}</em>
+    </div>`;
+  }).join("");
+  const metrics = report && Object.keys(report).length
+    ? `<div class="run-metrics">
+        ${renderRunMetric("风险等级", report.risk || "未知", `risk-${riskTone(report.risk)}`)}
+        ${renderRunMetric("发现问题", String((report.findings || []).length))}
+        ${renderRunMetric("审查文件", String((report.files_reviewed || []).length))}
+        ${renderRunMetric("模型调用", String(execution.llm_calls || 0))}
+      </div>`
+    : "";
+  return `<section class="run-visual${compact ? " is-compact" : ""}">
+    <header class="run-heading">
+      <span><small>LIVE EXECUTION</small><strong>${escapeHtml(repository)}</strong>${id ? `<code>${escapeHtml(id)}</code>` : ""}</span>
+      <span class="status ${statusClass}">${escapeHtml(stateLabels[state] || state)}</span>
+    </header>
+    <div class="run-track">${nodes}</div>
+    ${metrics}
+  </section>`;
+}
+
+function renderRawData(value) {
+  return `<details class="raw-data"><summary>查看原始 JSON <span>用于调试</span></summary><pre>${escapeHtml(formatJson(value))}</pre></details>`;
+}
+
+function renderFindings(report = {}) {
+  const findings = report.findings || [];
+  if (!findings.length) {
+    return `<div class="findings-empty"><b>未发现需要阻断的问题</b><span>本次审查已通过现有规则和质量门禁。</span></div>`;
+  }
+  const severityLabels = { critical: "严重", high: "高危", medium: "中危", low: "低危" };
+  return `<div class="finding-list">${findings.map((finding, index) => {
+    const severity = ["critical", "high", "medium", "low"].includes(String(finding.severity).toLowerCase())
+      ? String(finding.severity).toLowerCase()
+      : "unknown";
+    const location = `${finding.path || "未知文件"}:${finding.line || "?"}`;
+    return `<article class="finding-card severity-${severity}">
+      <header><span>${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(finding.title || finding.rule_id || "未命名问题")}</strong><em>${escapeHtml(severityLabels[severity] || severity)}</em></header>
+      <code>${escapeHtml(location)} · ${escapeHtml(finding.rule_id || "NO-RULE")}</code>
+      <p>${escapeHtml(finding.explanation || finding.evidence || "暂无详细说明")}</p>
+      ${finding.fix ? `<div><b>修复建议</b><span>${escapeHtml(finding.fix)}</span></div>` : ""}
+    </article>`;
+  }).join("")}</div>`;
+}
+
+function renderTaskReport(task) {
+  const root = $("#task-report");
+  if (!root) return;
+  const report = task?.report;
+  const summary = report
+    ? `<section class="report-content">
+        <header><span><small>审查结论</small><strong>${escapeHtml(report.summary || "审查已完成")}</strong></span><em class="risk-badge risk-${riskTone(report.risk)}">${escapeHtml(report.risk || "未知风险")}</em></header>
+        ${renderFindings(report)}
+      </section>`
+    : normalizeState(task?.state) === "FAILED"
+      ? `<div class="report-error"><b>任务执行失败</b><span>${escapeHtml(task.error || "请查看执行节点和调试数据")}</span></div>`
+      : "";
+  root.innerHTML = `${renderRunGraph(task)}${summary}${renderRawData(task)}`;
+}
+
+function renderReviewRun(task) {
+  const root = $("#review-result");
+  root.classList.remove("empty");
+  root.innerHTML = `${renderRunGraph(task, true)}${renderRawData(task)}`;
+}
+
+function waitFor(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function followSubmittedTask(taskId, generation) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    await waitFor(attempt === 0 ? 500 : 1250);
+    if (generation !== reviewPollGeneration) return;
+    const task = await api(`/v1/tasks/${encodeURIComponent(taskId)}`);
+    if (generation !== reviewPollGeneration) return;
+    renderReviewRun(task);
+    if (terminalTaskStates.has(normalizeState(task.state))) {
+      loadDashboard();
+      return;
+    }
+  }
+  if (generation === reviewPollGeneration) toast("任务仍在后台执行，可前往任务中心继续查看");
 }
 
 async function api(path, options = {}) {
@@ -238,26 +437,40 @@ async function loadTasks() {
   }
 }
 
-async function openTask(id) {
-  show("tasks");
-  $("#task-report").textContent = "正在加载任务报告…";
-  $("#feedback-panel").classList.add("hidden");
-  try {
-    const task = await api(`/v1/tasks/${encodeURIComponent(id)}`);
-    selectedTask = id;
-    selectedTaskData = task;
-    $("#task-report").textContent = formatJson(task);
-    $("#create-fix").classList.toggle("hidden", !(task.report && task.pull_request));
-    const feedbackReady = task.state === "SUCCESS" && task.report;
-    $("#feedback-panel").classList.toggle("hidden", !feedbackReady);
-    if (feedbackReady) {
-      populateFeedbackFindings(task.report.findings || []);
-      await loadTaskFeedback(id);
+async function followTaskDetail(id, generation) {
+  for (let attempt = 0; attempt < 240; attempt += 1) {
+    if (attempt > 0) await waitFor(1250);
+    if (generation !== taskPollGeneration || selectedTask !== id) return;
+    try {
+      const task = await api(`/v1/tasks/${encodeURIComponent(id)}`);
+      if (generation !== taskPollGeneration || selectedTask !== id) return;
+      selectedTaskData = task;
+      renderTaskReport(task);
+      $("#create-fix").classList.toggle("hidden", !(task.report && task.pull_request));
+      const feedbackReady = task.state === "SUCCESS" && task.report;
+      $("#feedback-panel").classList.toggle("hidden", !feedbackReady);
+      if (feedbackReady) {
+        populateFeedbackFindings(task.report.findings || []);
+        await loadTaskFeedback(id);
+      }
+      if (terminalTaskStates.has(normalizeState(task.state))) return;
+    } catch (error) {
+      if (generation !== taskPollGeneration) return;
+      $("#task-report").innerHTML = `<div class="report-error"><b>无法读取任务</b><span>${escapeHtml(error.message)}</span></div>`;
+      selectedTaskData = null;
+      return;
     }
-  } catch (error) {
-    $("#task-report").textContent = error.message;
-    selectedTaskData = null;
   }
+}
+
+function openTask(id) {
+  show("tasks");
+  selectedTask = id;
+  selectedTaskData = null;
+  const generation = ++taskPollGeneration;
+  $("#task-report").innerHTML = '<div class="report-loading"><i></i><span>正在读取执行节点…</span></div>';
+  $("#feedback-panel").classList.add("hidden");
+  void followTaskDetail(id, generation);
 }
 
 const feedbackLabels = {
@@ -373,9 +586,8 @@ $("#review-form").addEventListener("submit", async (event) => {
   const body = { repository: values.get("repository"), diff: values.get("diff"), mode: values.get("mode") };
   if (values.get("pull_request")) body.pull_request = Number(values.get("pull_request"));
   const asyncQuery = values.get("async") ? "?async=true" : "";
-  const output = $("#review-result");
-  output.classList.remove("empty");
-  output.textContent = "正在提交审查任务…";
+  const generation = ++reviewPollGeneration;
+  renderReviewRun({ state: "SUBMITTING", repository: body.repository, pull_request: body.pull_request });
   setButtonBusy(button, true, "正在提交…");
   try {
     const data = await api(`/v1/reviews${asyncQuery}`, {
@@ -383,11 +595,17 @@ $("#review-form").addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    output.textContent = formatJson(data);
+    const task = { repository: body.repository, pull_request: body.pull_request, ...data };
+    renderReviewRun(task);
     toast("审查任务已成功提交");
     loadDashboard();
+    if (data.task_id && !terminalTaskStates.has(normalizeState(data.state))) {
+      void followSubmittedTask(data.task_id, generation).catch((error) => {
+        if (generation === reviewPollGeneration) toast(`实时状态更新中断：${error.message}`);
+      });
+    }
   } catch (error) {
-    output.textContent = error.message;
+    renderReviewRun({ state: "FAILED", repository: body.repository, error: error.message });
   } finally {
     setButtonBusy(button, false);
   }
@@ -403,7 +621,8 @@ $("#create-fix").addEventListener("click", async () => {
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    $("#task-report").textContent = formatJson(data);
+    selectedTaskData = { ...selectedTaskData, fix_result: data };
+    renderTaskReport(selectedTaskData);
     toast("修复分支已创建");
   } catch (error) {
     toast(error.message);

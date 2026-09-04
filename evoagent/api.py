@@ -127,6 +127,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/assets/app.js":
             self._serve_file("app.js")
             return
+        if path == "/assets/xidian-logo-on.png":
+            self._serve_file("assets/xidian-logo-on.png")
+            return
         if path == "/health":
             mode = resolve_mode(
                 None, bool(self.service.llm_config)
