@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f5f8fc">
   <title>智数所PR自动审查工具</title>
   <meta name="description" content="智数所PR自动审查工具：面向研发协作的智能代码审查控制台">
-  <link rel="stylesheet" href="/assets/app.css?v=20260805.7">
+  <link rel="stylesheet" href="/assets/app.css?v=20260805.8">
   <link rel="stylesheet" href="/assets/login.css?v=20260805">
 </head>
 <body>
@@ -139,7 +139,9 @@
               <li><b>03</b><span><strong>质量门禁</strong><small>过滤无定位、无修复方案的结论</small></span></li>
               <li><b>04</b><span><strong>经验沉淀</strong><small>反馈自动进入失败案例库</small></span></li>
             </ol>
-            <div id="review-result" class="result empty" aria-live="polite">审查结果将在这里显示</div>
+            <div id="review-result" class="result runtime-result empty" aria-live="polite">
+              <div class="runtime-empty">审查任务提交后，将在这里展示实时执行节点。</div>
+            </div>
           </aside>
         </div>
       </section>
@@ -160,7 +162,9 @@
               <h3>任务报告</h3>
               <button class="button danger hidden" id="create-fix">创建修复分支</button>
             </div>
-            <pre id="task-report">请选择一个已完成的任务。</pre>
+            <div id="task-report" class="task-report-view" aria-live="polite">
+              <div class="report-empty">请选择一个任务查看执行节点和审查报告。</div>
+            </div>
             <section class="feedback-panel hidden" id="feedback-panel" aria-labelledby="feedback-title">
               <div class="feedback-head">
                 <div>
@@ -279,6 +283,6 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260805.6"></script>
+  <script src="/assets/app.js?v=20260805.7"></script>
 </body>
 </html>
