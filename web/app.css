@@ -53,7 +53,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 
 .app-shell {
   display: grid;
-  grid-template-columns: 252px minmax(0, 1fr);
+  grid-template-columns: 280px minmax(0, 1fr);
   min-height: 100dvh;
 }
 .sidebar {
@@ -852,10 +852,11 @@ body {
   object-position: left center;
 }
 .brand-copy {
-  max-width: 152px;
+  max-width: none;
   color: var(--ink);
   font-size: 15px;
   line-height: 1.35;
+  white-space: nowrap;
 }
 .brand-copy small, .login-brand small {
   color: var(--faint);
